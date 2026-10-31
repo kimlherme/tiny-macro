@@ -6,62 +6,20 @@ Um gravador de ações de teclado e mouse para Linux, inspirado no TinyTask. Gra
 
 ## Instalação fácil — Omarchy e Arch Linux
 
-Ainda não há instalador gráfico. Estes passos compilam o aplicativo no seu computador e adicionam um atalho ao menu.
-
-### 1. Instale as dependências
-
-Abra um terminal e execute:
+O instalador apresenta telas interativas no terminal, compila o aplicativo e cria o atalho no menu. Ele oferece instalar as dependências e configurar permissões separadamente.
 
 ```bash
-sudo pacman -S --needed git rust gtk4 pkgconf
-```
-
-### 2. Baixe e compile
-
-```bash
+sudo pacman -S --needed git
 git clone https://github.com/kimlherme/tiny-macro.git
 cd tiny-macro
-cargo build --release --locked
+bash install.sh
 ```
 
-### 3. Configure o acesso ao teclado e ao mouse
+Execute como usuário normal: o instalador solicitará `sudo` quando necessário. Se `whiptail` estiver instalado, as perguntas aparecem em janelas no terminal; caso contrário, aparecem como perguntas de texto. Para compilar, é necessário acesso às dependências Rust.
 
-O aplicativo precisa ler `/dev/input/event*` para gravar e escrever em `/dev/uinput` para reproduzir. **O grupo `input` dá acesso amplo aos dispositivos de entrada**, permitindo que programas executados pelo seu usuário leiam teclas e simulem entrada. Faça esta configuração somente em uma conta confiável.
+**Permissões:** se você aceitar a configuração, o instalador adicionará sua conta ao grupo `input` e criará regras para `/dev/uinput`. Isso dá aos programas executados pela sua conta acesso amplo para ler e simular entrada, podendo expor senhas. Encerre a sessão e entre novamente depois de aceitar. Você pode recusar: o aplicativo será instalado, mas a gravação e a reprodução podem não funcionar sem permissões já configuradas.
 
-```bash
-sudo usermod -aG input "$USER"
-printf '%s\n' uinput | sudo tee /etc/modules-load.d/tiny-macro-uinput.conf
-printf '%s\n' 'KERNEL=="uinput", GROUP="input", MODE="0660"' | sudo tee /etc/udev/rules.d/70-tiny-macro-uinput.rules
-sudo modprobe uinput
-sudo udevadm control --reload-rules
-sudo udevadm trigger --action=change /dev/uinput
-```
-
-**Encerre a sessão e entre novamente** para que a participação no grupo seja aplicada. Depois, confira:
-
-```bash
-id -nG
-ls -l /dev/uinput /dev/input/event*
-```
-
-O grupo `input` deve aparecer na primeira linha, e `/dev/uinput` deve permitir escrita para esse grupo. Se não aparecer, reinicie o computador e confira novamente. Em outros ambientes ou sistemas de permissões, pode ser necessário consultar a documentação da distribuição.
-
-### 4. Abra o aplicativo
-
-Dentro da pasta clonada:
-
-```bash
-./target/release/tiny-macro-linux
-```
-
-Para adicionar ao menu de aplicativos, execute **dentro da pasta do projeto**:
-
-```bash
-mkdir -p "$HOME/.local/share/applications"
-printf '[Desktop Entry]\nType=Application\nName=Tiny Macro Linux\nComment=Gravar e reproduzir teclado e mouse\nExec=%s/target/release/tiny-macro-linux\nIcon=input-keyboard\nTerminal=false\nCategories=Utility;\nKeywords=macro;tinytask;teclado;mouse;\n' "$PWD" > "$HOME/.local/share/applications/tiny-macro-linux.desktop"
-```
-
-Procure por **Tiny Macro Linux** no launcher. Se não aparecer de imediato, feche e reabra a busca. O atalho usa o caminho atual do projeto; se mover a pasta, execute o comando novamente dentro do novo local. Para caminhos com espaços, use uma pasta sem espaços para esta versão do tutorial.
+Depois da instalação, procure **Tiny Macro Linux** no launcher. O executável fica em `${XDG_DATA_HOME:-$HOME/.local/share}/tiny-macro-linux/` e o atalho em `${XDG_DATA_HOME:-$HOME/.local/share}/applications/`.
 
 ## Como usar
 
@@ -87,10 +45,11 @@ No Hyprland, **Fixar sobre janelas** torna a janela flutuante e a fixa nos espa�
 
 ## Desinstalar
 
-Apague a pasta clonada e remova o atalho, se criado:
+Remova o aplicativo instalado e o atalho:
 
 ```bash
-rm -f "$HOME/.local/share/applications/tiny-macro-linux.desktop"
+rm -f "${XDG_DATA_HOME:-$HOME/.local/share}/applications/tiny-macro-linux.desktop"
+rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/tiny-macro-linux"
 ```
 
 Se você criou as regras de permissão deste tutorial e não precisa delas para outros programas, remova-as e retire seu usuário do grupo `input`:
