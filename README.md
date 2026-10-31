@@ -26,7 +26,8 @@ Depois da instalação, procure **Tiny Macro Linux** no launcher. O executável 
 1. Clique em **Gravar** ou pressione **F6**.
 2. Faça a sequência desejada.
 3. Clique em **Parar** ou pressione **F7**, **Pause** ou **Scroll Lock**.
-4. Clique em **Reproduzir** ou pressione **F8**. A reprodução começa imediatamente: prepare a janela de destino antes.
+4. Clique em **Macros** e escolha quantas vezes reproduzir ou marque **Repetir até parar**. Clique em **Reproduzir** ou pressione **F8**. A reprodução começa imediatamente: prepare a janela de destino antes.
+   Para interromper, use **Parar**, **F7** (ou a tecla de parada configurada), **Pause** ou **Scroll Lock**.
 5. Use **Salvar** para guardar a macro em JSON e **Abrir** para carregá-la depois.
 
 Em **⚙ Atalhos**, escolha teclas entre F6 e F12 para iniciar e parar a gravação e iniciar a reprodução. Cada ação deve usar uma tecla diferente. Pause e Scroll Lock continuam disponíveis como parada de emergência. Os atalhos também podem ser recebidos pelo aplicativo que estiver em foco.
@@ -36,7 +37,7 @@ No Hyprland, **Fixar sobre janelas** torna a janela flutuante e a fixa nos espa�
 ## Privacidade e limitações
 
 - As gravações ficam locais, mas podem conter senhas e tudo que você digitou. O arquivo JSON **não é criptografado**.
-- A reprodução ocorre uma vez, na velocidade gravada. Alteração de velocidade, repetição, contagem regressiva e exportação para executável ainda não estão disponíveis.
+- A reprodução usa a velocidade gravada. Alteração de velocidade, contagem regressiva e exportação para executável ainda não estão disponíveis.
 - Arquivos `.rec` do TinyTask original ainda não são compatíveis.
 - Movimento relativo, botões, teclado e rolagem são suportados; toque, mesa digitalizadora e movimento absoluto ainda não são.
 - Dispositivos conectados após o início da operação não são acompanhados. Mudanças de foco, resolução, layout ou monitor podem alterar o resultado.

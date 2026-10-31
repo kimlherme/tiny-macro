@@ -1,7 +1,7 @@
 use gtk::prelude::*;
 use gtk::{
-    Application, ApplicationWindow, Box as VBox, Button, DropDown, FileChooserAction,
-    FileChooserNative, Label, Orientation, ResponseType, ToggleButton,
+    Application, ApplicationWindow, Box as VBox, Button, CheckButton, DropDown, FileChooserAction,
+    FileChooserNative, Label, Orientation, ResponseType, SpinButton, ToggleButton,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -158,7 +158,7 @@ struct Setup {
 }
 struct Device(File);
 impl Device {
-    fn new() -> io::Result<Self> {
+    fn new(pointer: bool) -> io::Result<Self> {
         let f = OpenOptions::new().write(true).open("/dev/uinput")?;
         let fd = f.as_raw_fd();
         let set = |req: libc::c_ulong, val: libc::c_int| {
@@ -168,14 +168,19 @@ impl Device {
                 Ok(())
             }
         };
-        for t in [1, 2] {
-            set(0x40045564, t)?
-        }
-        for k in 0..=767 {
-            set(0x40045565, k)?
-        }
-        for k in 0..=15 {
-            set(0x40045566, k)?
+        set(0x40045564, 1)?;
+        if pointer {
+            set(0x40045564, 2)?;
+            for k in 0x110..=0x117 {
+                set(0x40045565, k)?;
+            }
+            for k in [0, 1, 6, 8, 11, 12] {
+                set(0x40045566, k)?;
+            }
+        } else {
+            for k in (1..=0xff).chain(0x160..=0x2bf) {
+                set(0x40045565, k)?;
+            }
         }
         let mut s = Setup {
             id: Id {
@@ -187,7 +192,12 @@ impl Device {
             name: [0; 80],
             ff: 0,
         };
-        s.name[..16].copy_from_slice(b"Tiny Macro Linux");
+        let name: &[u8] = if pointer {
+            b"Tiny Macro Mouse"
+        } else {
+            b"Tiny Macro Keyboard"
+        };
+        s.name[..name.len()].copy_from_slice(name);
         if unsafe { libc::ioctl(fd, 0x405c5503, &s) } < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -217,39 +227,71 @@ impl Drop for Device {
         }
     }
 }
+fn repeat_playback<F>(count: Option<u32>, stop: &AtomicBool, mut play_once: F) -> Result<(), String>
+where
+    F: FnMut() -> Result<(), String>,
+{
+    let mut completed = 0u32;
+    while !stop.load(Ordering::Relaxed) && count.is_none_or(|n| completed < n) {
+        play_once()?;
+        completed = completed.saturating_add(1);
+    }
+    Ok(())
+}
+fn event_destination(e: &Event) -> (bool, bool) {
+    match e.kind {
+        0 => (true, true),
+        1 if (0x110..=0x117).contains(&e.code) => (false, true),
+        1 => (true, false),
+        2 => (false, true),
+        _ => (false, false),
+    }
+}
 fn playback(
     events: Vec<Event>,
     mut files: Vec<File>,
     stop: Arc<AtomicBool>,
+    count: Option<u32>,
 ) -> Result<Vec<Event>, String> {
-    let mut dev = Device::new().map_err(|e| format!("/dev/uinput: {e}"))?;
+    let mut keyboard =
+        Device::new(false).map_err(|e| format!("Teclado virtual /dev/uinput: {e}"))?;
+    let mut pointer = Device::new(true).map_err(|e| format!("Mouse virtual /dev/uinput: {e}"))?;
     thread::sleep(Duration::from_millis(200));
-    let start = Instant::now();
-    for e in events {
-        while start.elapsed().as_micros() < (e.micros as u128) {
-            for f in &mut files {
-                loop {
-                    match read(f) {
-                        Ok(Some(v)) if halt(&v) => {
-                            stop.store(true, Ordering::Relaxed);
-                            break;
+    repeat_playback(count, &stop, || {
+        let start = Instant::now();
+        for e in &events {
+            loop {
+                for f in &mut files {
+                    loop {
+                        match read(f) {
+                            Ok(Some(v)) if halt(&v) => {
+                                stop.store(true, Ordering::Relaxed);
+                                break;
+                            }
+                            Ok(Some(_)) => {}
+                            Ok(None) => break,
+                            Err(e) => return Err(e.to_string()),
                         }
-                        Ok(Some(_)) => {}
-                        Ok(None) => break,
-                        Err(e) => return Err(e.to_string()),
                     }
                 }
+                if stop.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
+                if start.elapsed().as_micros() >= e.micros as u128 {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(2));
             }
-            if stop.load(Ordering::Relaxed) {
-                return Ok(vec![]);
+            let (to_keyboard, to_pointer) = event_destination(e);
+            if to_keyboard {
+                keyboard.send(e).map_err(|e| e.to_string())?;
             }
-            thread::sleep(Duration::from_millis(2));
+            if to_pointer {
+                pointer.send(e).map_err(|e| e.to_string())?;
+            }
         }
-        if stop.load(Ordering::Relaxed) {
-            break;
-        }
-        dev.send(&e).map_err(|e| e.to_string())?;
-    }
+        Ok(())
+    })?;
     Ok(vec![])
 }
 fn config_path() -> std::path::PathBuf {
@@ -312,12 +354,47 @@ fn main() {
         let open = Button::with_label("Abrir");
         let save = Button::with_label("Salvar");
         let config = Button::with_label("⚙ Atalhos");
+        let macros = Button::with_label("Macros");
         record.add_css_class("suggested-action");
         stop.add_css_class("destructive-action");
-        for b in [&record, &play, &stop, &open, &save, &config] {
+        for b in [&record, &play, &stop, &open, &save, &macros, &config] {
             row.append(b)
         }
         root.append(&row);
+        let macro_dialog = gtk::Window::builder()
+            .title("Opções de macros")
+            .transient_for(&win)
+            .hide_on_close(true)
+            .default_width(360)
+            .build();
+        let macro_layout = VBox::new(Orientation::Vertical, 12);
+        macro_layout.set_margin_top(16);
+        macro_layout.set_margin_bottom(16);
+        macro_layout.set_margin_start(16);
+        macro_layout.set_margin_end(16);
+        let description = Label::new(Some("Escolha como a macro será reproduzida."));
+        description.set_xalign(0.0);
+        macro_layout.append(&description);
+        let repeat_row = VBox::new(Orientation::Horizontal, 8);
+        repeat_row.append(&Label::new(Some("Reproduzir")));
+        let repeat_count = SpinButton::with_range(1.0, 1000000.0, 1.0);
+        repeat_count.set_value(1.0);
+        repeat_count.set_numeric(true);
+        repeat_row.append(&repeat_count);
+        repeat_row.append(&Label::new(Some("vezes")));
+        let infinite = CheckButton::with_label("Repetir até parar");
+        repeat_row.append(&infinite);
+        { let repeat_count = repeat_count.clone(); infinite.connect_toggled(move |button| repeat_count.set_sensitive(!button.is_active())); }
+        macro_layout.append(&repeat_row);
+        let repeat_hint = Label::new(Some("Use Parar, F7 (ou o atalho configurado), Pause ou Scroll Lock para interromper."));
+        repeat_hint.set_wrap(true);
+        repeat_hint.set_xalign(0.0);
+        macro_layout.append(&repeat_hint);
+        let close = Button::with_label("Concluído");
+        { let dialog = macro_dialog.clone(); close.connect_clicked(move |_| dialog.hide()); }
+        macro_layout.append(&close);
+        macro_dialog.set_child(Some(&macro_layout));
+        { let dialog = macro_dialog.clone(); macros.connect_clicked(move |_| dialog.present()); }
         let overlay = ToggleButton::with_label("Fixar sobre janelas");
         overlay.set_tooltip_text(Some(
             "Janela flutuante em todos os espaços de trabalho no Hyprland",
@@ -407,7 +484,7 @@ fn main() {
             gtk::glib::timeout_add_local(Duration::from_millis(20), move || {
                 while let Ok(code) = hot_rx.try_recv() {
                     let s = state.borrow();
-                    if s.stop.is_some() { if s.recording && code == s.keys[1] { drop(s); stop.emit_clicked(); } }
+                    if s.stop.is_some() { if code == s.keys[1] { drop(s); stop.emit_clicked(); } }
                     else if code == s.keys[0] { drop(s); record.emit_clicked(); }
                     else if code == s.keys[2] { drop(s); play.emit_clicked(); }
                 }
@@ -419,6 +496,8 @@ fn main() {
             let s = state.clone();
             let l = label.clone();
             let tx = tx.clone();
+            let repeat_count = repeat_count.clone();
+            let infinite = infinite.clone();
             button.connect_clicked(move |_| {
                 if s.borrow().stop.is_some() {
                     return;
@@ -436,6 +515,7 @@ fn main() {
                         state.recording = rec;
                         let events = state.events.clone();
                         let keys = state.keys;
+                        let count = if infinite.is_active() { None } else { Some(repeat_count.value_as_int() as u32) };
                         let tx = tx.clone();
                         l.set_text(if rec {
                             "Gravando…"
@@ -446,7 +526,7 @@ fn main() {
                             let r = if rec {
                                 capture(files, flag, keys)
                             } else {
-                                playback(events, files, flag)
+                                playback(events, files, flag, count)
                             };
                             let _ = tx.send(r);
                         });
@@ -556,6 +636,186 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn repeat_count_and_stop() {
+        let stop = AtomicBool::new(false);
+        let mut calls = 0;
+        repeat_playback(Some(3), &stop, || {
+            calls += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(calls, 3);
+        let mut calls = 0;
+        repeat_playback(None, &stop, || {
+            calls += 1;
+            if calls == 4 {
+                stop.store(true, Ordering::Relaxed);
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(calls, 4);
+    }
+    #[test]
+    fn capture_preserves_mouse_and_keyboard_and_filters_shortcuts() {
+        use std::os::fd::FromRawFd;
+        let mut fds = [0; 2];
+        assert_eq!(
+            unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_NONBLOCK) },
+            0
+        );
+        let reader = unsafe { File::from_raw_fd(fds[0]) };
+        let mut writer = unsafe { File::from_raw_fd(fds[1]) };
+        let sequence = [
+            (2, 0, 12),
+            (2, 1, -8),
+            (0, 0, 0),
+            (1, 0x110, 1),
+            (0, 0, 0),
+            (1, 0x110, 0),
+            (0, 0, 0),
+            (1, 30, 1),
+            (1, 30, 0),
+            (0, 0, 0),
+            (1, 65, 1),
+        ];
+        for (kind, code, value) in sequence {
+            let event = Input {
+                time: unsafe { std::mem::zeroed() },
+                kind,
+                code,
+                value,
+            };
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    (&event as *const Input).cast(),
+                    std::mem::size_of::<Input>(),
+                )
+            };
+            writer.write_all(bytes).unwrap();
+        }
+        let result = capture(vec![reader], Arc::new(AtomicBool::new(false)), [64, 65, 66]).unwrap();
+        let actual: Vec<_> = result.iter().map(|e| (e.kind, e.code, e.value)).collect();
+        assert_eq!(actual, &sequence[..sequence.len() - 1]);
+        assert!(result.windows(2).all(|w| w[0].micros <= w[1].micros));
+        assert!(Macro {
+            version: 1,
+            events: result
+        }
+        .validate()
+        .is_ok());
+    }
+    #[test]
+    fn repeat_stops_on_error_and_honors_preexisting_stop() {
+        let stop = AtomicBool::new(false);
+        let mut calls = 0;
+        assert!(repeat_playback(Some(5), &stop, || {
+            calls += 1;
+            Err("falha".into())
+        })
+        .is_err());
+        assert_eq!(calls, 1);
+        stop.store(true, Ordering::Relaxed);
+        repeat_playback(None, &stop, || {
+            calls += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(calls, 1);
+    }
+    #[test]
+    fn route_mouse_buttons_and_sync() {
+        let event = |kind, code| Event {
+            micros: 0,
+            kind,
+            code,
+            value: 1,
+        };
+        for button in [0x110, 0x111, 0x112] {
+            assert_eq!(event_destination(&event(1, button)), (false, true));
+        }
+        assert_eq!(event_destination(&event(1, 30)), (true, false));
+        assert_eq!(event_destination(&event(2, 0)), (false, true));
+        assert_eq!(event_destination(&event(0, 0)), (true, true));
+    }
+    #[test]
+    #[ignore = "requires real /dev/uinput and input permissions"]
+    fn virtual_mouse_kernel_roundtrip() {
+        let mut pointer = Device::new(true).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let path = loop {
+            let found = fs::read_dir("/sys/class/input")
+                .unwrap()
+                .flatten()
+                .find_map(|entry| {
+                    let name = entry.file_name();
+                    if !name.to_string_lossy().starts_with("event") {
+                        return None;
+                    }
+                    let device_name = fs::read_to_string(entry.path().join("device/name")).ok()?;
+                    (device_name.trim() == "Tiny Macro Mouse")
+                        .then(|| std::path::Path::new("/dev/input").join(name))
+                });
+            if let Some(path) = found {
+                break path;
+            }
+            assert!(Instant::now() < deadline, "virtual mouse not registered");
+            thread::sleep(Duration::from_millis(20));
+        };
+        let mut input = loop {
+            match OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&path)
+            {
+                Ok(input) => break input,
+                Err(error) => {
+                    assert!(Instant::now() < deadline, "opening virtual input: {error}");
+                    thread::sleep(Duration::from_millis(20));
+                }
+            }
+        };
+        assert_eq!(
+            unsafe { libc::ioctl(input.as_raw_fd(), 0x40044590u64, 1) },
+            0,
+            "cannot exclusively grab test device"
+        );
+        let sequence = [
+            (2, 0, 12),
+            (2, 1, -7),
+            (1, 0x110, 1),
+            (0, 0, 0),
+            (1, 0x110, 0),
+            (0, 0, 0),
+            (1, 0x111, 1),
+            (1, 0x111, 0),
+            (1, 0x112, 1),
+            (1, 0x112, 0),
+            (2, 8, 1),
+            (2, 11, 120),
+            (0, 0, 0),
+        ];
+        for (kind, code, value) in sequence {
+            pointer
+                .send(&Event {
+                    micros: 0,
+                    kind,
+                    code,
+                    value,
+                })
+                .unwrap();
+        }
+        let mut received = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while received.len() < sequence.len() && Instant::now() < deadline {
+            match read(&mut input).unwrap() {
+                Some(e) => received.push((e.kind, e.code, e.value)),
+                None => thread::sleep(Duration::from_millis(2)),
+            }
+        }
+        assert_eq!(received, sequence);
+    }
     #[test]
     fn validate() {
         let mut m = Macro {
